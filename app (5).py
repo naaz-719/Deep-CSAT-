@@ -5,102 +5,107 @@ import joblib
 from textblob import TextBlob
 from datetime import datetime
 
-# --- PAGE CONFIG ---
-st.set_page_config(page_title="DeepCSAT Debugged", page_icon="🛡️", layout="wide")
+# --- SETTINGS ---
+st.set_page_config(page_title="DeepCSAT – Risk Predictor", layout="wide")
 
 @st.cache_resource
-def load_all():
+def load_assets():
     m = joblib.load('model.joblib')
     s = joblib.load('scaler.joblib')
     f = joblib.load('feature_names.joblib')
     return m, s, f
 
-model, scaler, expected_features = load_all()
+model, scaler, feature_names = load_assets()
 
-st.title("🛡️ DeepCSAT Risk Predictor (Verified)")
+# Helper to get clean categories from the joblib list
+def get_options(prefix):
+    return sorted([c.replace(prefix, "") for c in feature_names if c.startswith(prefix)])
 
-# --- 1. DYNAMIC INPUTS ---
-# We use the actual feature names to build the UI so there's no mismatch
+# --- UI ---
+st.title("🛡️ DeepCSAT Prediction Engine")
+st.markdown("Identifies high-risk interactions (Target 0) vs Low-risk (Target 1).")
+
 with st.sidebar:
-    st.header("1. Interaction Data")
-    # Item Price & Handling Time are direct numericals
-    price = st.number_input("Item Price", value=1000.0)
-    handling_time = st.number_input("Handling Time (sec)", value=300)
+    st.header("📋 Interaction Metrics")
+    price = st.number_input("Item Price", value=500.0)
+    handling = st.number_input("Handling Time (Seconds)", value=120)
     
-    # Dates for Response Time
-    t_rep = st.text_input("Reported (DD/MM/YYYY HH:MM)", "01/08/2023 10:00")
-    t_res = st.text_input("Responded (DD/MM/YYYY HH:MM)", "01/08/2023 11:30")
+    st.header("🕒 Response Time")
+    t_rep = st.date_input("Reported Date", datetime(2023, 8, 1))
+    t_rep_time = st.time_input("Reported Time", datetime.strptime("10:00", "%H:%M").time())
+    t_res = st.date_input("Responded Date", datetime(2023, 8, 2))
+    t_res_time = st.time_input("Responded Time", datetime.strptime("10:00", "%H:%M").time())
 
-    st.header("2. Categories")
-    # Matching exact categories from your feature_names.joblib
-    chan = st.selectbox("Channel", ["Inbound", "Outcall"])
-    cat = st.selectbox("Category", ["Order Related", "Refund Related", "Returns", "Cancellation", "Product Queries"])
-    tenure = st.selectbox("Tenure", [">90", "61-90", "31-60", "0-30", "On Job Training"])
+    st.header("📁 Categorization")
+    chan = st.selectbox("Channel", get_options("channel_name_"))
+    cat = st.selectbox("Category", get_options("category_"))
+    sub_cat = st.selectbox("Sub-Category", get_options("Sub-category_"))
+    prod = st.selectbox("Product", get_options("Product_category_"))
+    tenure = st.selectbox("Tenure", get_options("Tenure Bucket_"))
 
-st.header("Customer Feedback")
-remarks = st.text_area("Customer Remarks", "The agent was very slow and didn't help.")
+st.subheader("💬 Customer Feedback")
+remarks = st.text_area("Customer Remarks", placeholder="Enter the exact customer comment...")
 
-if st.button("Run Prediction"):
-    # --- 2. CALCULATE TRANSFORMED FEATURES ---
+if st.button("Analyze Risk"):
+    # 1. Calculation Logic (Matching Notebook)
     blob = TextBlob(remarks)
-    sent_score = blob.sentiment.polarity
+    sentiment = blob.sentiment.polarity
     word_count = len(remarks.split())
     
-    try:
-        fmt = '%d/%m/%Y %H:%M'
-        diff = (datetime.strptime(t_res, fmt) - datetime.strptime(t_rep, fmt)).total_seconds() / 60.0
-        log_res_time = np.log1p(max(0, diff))
-    except:
-        log_res_time = 0
+    # Calculate Response Time (Minutes)
+    dt_rep = datetime.combine(t_rep, t_rep_time)
+    dt_res = datetime.combine(t_res, t_res_time)
+    diff_minutes = (dt_res - dt_rep).total_seconds() / 60
+    log_response_time = np.log1p(max(0, diff_minutes))
 
-    # --- 3. THE FIX: EXACT FEATURE ALIGNMENT ---
-    # Create an empty row with all 92 features set to 0
-    input_df = pd.DataFrame(0, index=[0], columns=expected_features)
+    # 2. Build the exact 92-feature vector
+    input_df = pd.DataFrame(0, index=[0], columns=feature_names)
     
-    # Fill Numerical Features
+    # Numerical mapping
     input_df['Item_price'] = price
-    input_df['connected_handling_time'] = handling_time
-    input_df['Sentiment_Score'] = sent_score
+    input_df['connected_handling_time'] = handling
+    input_df['Sentiment_Score'] = sentiment
     input_df['Remark_Word_Count'] = word_count
-    input_df['Log_Response_Time'] = log_res_time
+    input_df['Log_Response_Time'] = log_response_time
     
-    # Fill Categorical Features (One-Hot Encoding Manual Match)
-    # We construct the string exactly how joblib expects it: "Prefix_Value"
-    cols_to_set = [
-        f"channel_name_{chan}",
-        f"category_{cat}",
-        f"Tenure Bucket_{tenure}"
-    ]
-    
-    for c in cols_to_set:
-        if c in expected_features:
-            input_df[c] = 1
-        else:
-            st.warning(f"Feature '{c}' not found in model schema. Check spelling/casing.")
+    # Categorical mapping (One-Hot)
+    for col, val in [("channel_name_", chan), ("category_", cat), 
+                     ("Sub-category_", sub_cat), ("Product_category_", prod), 
+                     ("Tenure Bucket_", tenure)]:
+        full_col = f"{col}{val}"
+        if full_col in feature_names:
+            input_df[full_col] = 1
 
-    # --- 4. PREDICTION ---
-    # Scale exactly like training
-    scaled_x = scaler.transform(input_df)
+    # 3. Scaling & Prediction
+    # CRITICAL: We must re-order columns to match the scaler's original training order
+    input_df = input_df[feature_names] 
     
-    prob = model.predict_proba(scaled_x)[0][1]
-    pred = 1 if prob > 0.5 else 0 # Explicit threshold
+    scaled_data = scaler.transform(input_df)
+    
+    # Risk calculation
+    prob = model.predict_proba(scaled_data)[0] # [Prob_0, Prob_1]
+    prediction = model.predict(scaled_data)[0]
 
-    # --- 5. UI OUTPUT ---
+    # --- DISPLAY ---
     st.divider()
-    c1, c2 = st.columns(2)
-    with c1:
-        if pred == 1:
-            st.error(f"### Result: HIGH RISK ({(prob*100):.1f}%)")
-            st.write("Customer is likely to give a CSAT 0.")
-        else:
-            st.success(f"### Result: LOW RISK ({(prob*100):.1f}%)")
-            st.write("Customer is likely satisfied.")
+    
+    # In your notebook: 0 = Low CSAT (Risk), 1 = High CSAT (Safe)
+    if prediction == 0:
+        st.error(f"### 🚩 HIGH RISK DETECTED ({(prob[0]*100):.1f}%)")
+        st.write("The model predicts this customer will provide a **Low CSAT score (0)**.")
+    else:
+        st.success(f"### ✅ LOW RISK ({(prob[1]*100):.1f}%)")
+        st.write("The model predicts a **Satisfied outcome**.")
 
-    with c2:
-        st.write("**Processed Metrics:**")
-        st.write(f"- Sentiment: `{sent_score:.2f}`")
-        st.write(f"- Log Response Time: `{log_res_time:.2f}`")
-
-    # Debug: Show the active features
-    with st.expander("View Model Input Vector (Debug)"):
-        st.write(input_df.loc[:, (input_df != 0).any(axis=0)])
+    # --- DEBUG PANEL ---
+    with st.expander("🔍 Deep Debug: Why this output?"):
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.write("**Processed Features:**")
+            st.write(f"- Sentiment: `{sentiment:.2f}`")
+            st.write(f"- Log Resp Time: `{log_response_time:.2f}`")
+            st.write(f"- Word Count: `{word_count}`")
+        with col_b:
+            st.write("**Top Active Features:**")
+            active = input_df.loc[:, (input_df != 0).any(axis=0)]
+            st.table(active.T)
