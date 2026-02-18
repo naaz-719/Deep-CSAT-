@@ -5,107 +5,99 @@ import joblib
 from textblob import TextBlob
 from datetime import datetime
 
-# --- SETTINGS ---
-st.set_page_config(page_title="DeepCSAT – Risk Predictor", layout="wide")
-
+# --- LOAD ASSETS ---
 @st.cache_resource
-def load_assets():
+def load_all():
+    # Load your specific uploaded files
     m = joblib.load('model.joblib')
     s = joblib.load('scaler.joblib')
     f = joblib.load('feature_names.joblib')
     return m, s, f
 
-model, scaler, feature_names = load_assets()
+try:
+    model, scaler, feature_names = load_all()
+except Exception as e:
+    st.error(f"Failed to load joblib files: {e}")
+    st.stop()
 
-# Helper to get clean categories from the joblib list
-def get_options(prefix):
+# --- DYNAMIC CATEGORY EXTRACTOR ---
+def get_cats(prefix):
     return sorted([c.replace(prefix, "") for c in feature_names if c.startswith(prefix)])
 
-# --- UI ---
-st.title("🛡️ DeepCSAT Prediction Engine")
-st.markdown("Identifies high-risk interactions (Target 0) vs Low-risk (Target 1).")
+st.title("🛡️ DeepCSAT Production Predictor")
 
-with st.sidebar:
-    st.header("📋 Interaction Metrics")
-    price = st.number_input("Item Price", value=500.0)
-    handling = st.number_input("Handling Time (Seconds)", value=120)
+# --- UI LAYOUT ---
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("📊 Numeric Metrics")
+    price = st.number_input("Item Price", value=1500.0)
+    handling = st.number_input("Handling Time (Seconds)", value=300)
     
-    st.header("🕒 Response Time")
-    t_rep = st.date_input("Reported Date", datetime(2023, 8, 1))
-    t_rep_time = st.time_input("Reported Time", datetime.strptime("10:00", "%H:%M").time())
-    t_res = st.date_input("Responded Date", datetime(2023, 8, 2))
-    t_res_time = st.time_input("Responded Time", datetime.strptime("10:00", "%H:%M").time())
+    st.subheader("🕒 Timing")
+    t_rep = st.text_input("Issue Reported (DD/MM/YYYY HH:MM)", "01/08/2023 10:00")
+    t_res = st.text_input("Issue Responded (DD/MM/YYYY HH:MM)", "01/08/2023 12:00")
 
-    st.header("📁 Categorization")
-    chan = st.selectbox("Channel", get_options("channel_name_"))
-    cat = st.selectbox("Category", get_options("category_"))
-    sub_cat = st.selectbox("Sub-Category", get_options("Sub-category_"))
-    prod = st.selectbox("Product", get_options("Product_category_"))
-    tenure = st.selectbox("Tenure", get_options("Tenure Bucket_"))
+with col2:
+    st.subheader("📂 Categorization")
+    chan = st.selectbox("Channel", get_cats("channel_name_"))
+    cat = st.selectbox("Category", get_cats("category_"))
+    sub_cat = st.selectbox("Sub-category", get_cats("Sub-category_"))
+    prod = st.selectbox("Product", get_cats("Product_category_"))
+    tenure = st.selectbox("Tenure", get_cats("Tenure Bucket_"))
 
-st.subheader("💬 Customer Feedback")
-remarks = st.text_area("Customer Remarks", placeholder="Enter the exact customer comment...")
+st.subheader("💬 Feedback")
+remarks = st.text_area("Customer Remarks", "The agent was unhelpful and I am still waiting.")
 
-if st.button("Analyze Risk"):
-    # 1. Calculation Logic (Matching Notebook)
-    blob = TextBlob(remarks)
-    sentiment = blob.sentiment.polarity
-    word_count = len(remarks.split())
-    
-    # Calculate Response Time (Minutes)
-    dt_rep = datetime.combine(t_rep, t_rep_time)
-    dt_res = datetime.combine(t_res, t_res_time)
-    diff_minutes = (dt_res - dt_rep).total_seconds() / 60
-    log_response_time = np.log1p(max(0, diff_minutes))
+if st.button("🚀 Predict CSAT Risk"):
+    try:
+        # 1. Feature Engineering (As per Notebook)
+        blob = TextBlob(remarks)
+        sent = blob.sentiment.polarity
+        words = len(remarks.split())
+        
+        # Date Difference
+        fmt = '%d/%m/%Y %H:%M'
+        dt_diff = (datetime.strptime(t_res, fmt) - datetime.strptime(t_rep, fmt)).total_seconds() / 60.0
+        log_res = np.log1p(max(0, dt_diff))
 
-    # 2. Build the exact 92-feature vector
-    input_df = pd.DataFrame(0, index=[0], columns=feature_names)
-    
-    # Numerical mapping
-    input_df['Item_price'] = price
-    input_df['connected_handling_time'] = handling
-    input_df['Sentiment_Score'] = sentiment
-    input_df['Remark_Word_Count'] = word_count
-    input_df['Log_Response_Time'] = log_response_time
-    
-    # Categorical mapping (One-Hot)
-    for col, val in [("channel_name_", chan), ("category_", cat), 
-                     ("Sub-category_", sub_cat), ("Product_category_", prod), 
-                     ("Tenure Bucket_", tenure)]:
-        full_col = f"{col}{val}"
-        if full_col in feature_names:
-            input_df[full_col] = 1
+        # 2. Build 92-Column Input
+        # We initialize with Zeros to ensure all OHE columns exist
+        input_df = pd.DataFrame(0.0, index=[0], columns=feature_names)
+        
+        # Map Numerics
+        input_df['Item_price'] = float(price)
+        input_df['connected_handling_time'] = float(handling)
+        input_df['Sentiment_Score'] = float(sent)
+        input_df['Remark_Word_Count'] = float(words)
+        input_df['Log_Response_Time'] = float(log_res)
+        
+        # Map One-Hot Categories
+        for prefix, val in [("channel_name_", chan), ("category_", cat), 
+                            ("Sub-category_", sub_cat), ("Product_category_", prod), 
+                            ("Tenure Bucket_", tenure)]:
+            col_name = f"{prefix}{val}"
+            if col_name in feature_names:
+                input_df[col_name] = 1.0
 
-    # 3. Scaling & Prediction
-    # CRITICAL: We must re-order columns to match the scaler's original training order
-    input_df = input_df[feature_names] 
-    
-    scaled_data = scaler.transform(input_df)
-    
-    # Risk calculation
-    prob = model.predict_proba(scaled_data)[0] # [Prob_0, Prob_1]
-    prediction = model.predict(scaled_data)[0]
+        # 3. CRITICAL STEP: Reorder columns to match exactly what scaler expects
+        input_df = input_df[feature_names]
 
-    # --- DISPLAY ---
-    st.divider()
-    
-    # In your notebook: 0 = Low CSAT (Risk), 1 = High CSAT (Safe)
-    if prediction == 0:
-        st.error(f"### 🚩 HIGH RISK DETECTED ({(prob[0]*100):.1f}%)")
-        st.write("The model predicts this customer will provide a **Low CSAT score (0)**.")
-    else:
-        st.success(f"### ✅ LOW RISK ({(prob[1]*100):.1f}%)")
-        st.write("The model predicts a **Satisfied outcome**.")
+        # 4. Scale and Predict
+        scaled_x = scaler.transform(input_df)
+        prob = model.predict_proba(scaled_x)[0] # [Prob_0, Prob_1]
+        pred = model.predict(scaled_x)[0]
 
-    # --- DEBUG PANEL ---
-    with st.expander("🔍 Deep Debug: Why this output?"):
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.write("**Processed Features:**")
-            st.write(f"- Sentiment: `{sentiment:.2f}`")
-            st.write(f"- Log Resp Time: `{log_response_time:.2f}`")
-            st.write(f"- Word Count: `{word_count}`")
-        with col_b:
-            st.write("**Top Active Features:**")
-            active = input_df.loc[:, (input_df != 0).any(axis=0)]
-            st.table(active.T)
+        # 5. Output Results
+        st.divider()
+        # In the notebook: Class 0 = Low CSAT (Risk), Class 1 = High CSAT (Safe)
+        if pred == 0:
+            st.error(f"### 🚩 HIGH RISK (Score 0) | Confidence: {prob[0]*100:.1f}%")
+            st.warning("Customer is likely to be dissatisfied.")
+        else:
+            st.success(f"### ✅ LOW RISK (Score 1) | Confidence: {prob[1]*100:.1f}%")
+            st.info("Customer interaction looks healthy.")
+
+    except Exception as e:
+        st.error(f"Prediction Error: {e}")
+        st.info("Check if your date format is exactly DD/MM/YYYY HH:MM (e.g., 01/08/2023 14:00)")
