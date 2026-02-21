@@ -1,17 +1,17 @@
 # Web Framework
-streamlit==1.31.0
+streamlit
 
 # Data Processing & Math
-pandas==2.1.4
-numpy==1.26.3
-scikit-learn==1.3.2
+pandas
+numpy
+scikit-learn
 
 # Machine Learning Model
-xgboost==2.0.3
+xgboost
 joblib
 
 # Natural Language Processing (for Sentiment_Score)
-textblob==0.17.1
+textblob
 
 # Utilities
-python-dateutil==2.8.2
+python-dateutil
