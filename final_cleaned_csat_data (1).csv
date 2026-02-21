@@ -1,0 +1,4 @@
+Response_Time_Minutes,Sentiment_Score,CSAT_Binary
+10,0.8,1
+50,-0.2,0
+12,0.5,1
